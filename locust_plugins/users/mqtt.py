@@ -52,6 +52,13 @@ class SubscribeContext(typing.NamedTuple):
     qos: int
     topic: str
     start_time: float
+    message_in_events: bool
+
+
+class SubscriptionContext(typing.NamedTuple):
+    """Stores metadata about current subscriptions."""
+
+    granted_qos: list[int]
 
 
 class MqttClient(mqtt.Client):
@@ -98,9 +105,10 @@ class MqttClient(mqtt.Client):
         self.on_subscribe = self._on_subscribe_cb
         self.on_disconnect = self._on_disconnect_cb
         self.on_connect = self._on_connect_cb
-
+        self.on_message = self._on_message_cb
         self._publish_requests: dict[int, PublishedMessageContext] = {}
         self._subscribe_requests: dict[int, SubscribeContext] = {}
+        self._subscriptions: dict[str, SubscriptionContext] = {}
 
     def _on_publish_cb(
         self,
@@ -187,6 +195,8 @@ class MqttClient(mqtt.Client):
                         **request_context._asdict(),
                     },
                 )
+                if request_context.message_in_events:
+                    self._subscriptions[request_context.topic] = SubscriptionContext(granted_qos=granted_qos)
 
     def _on_disconnect_cb(
         self,
@@ -247,6 +257,27 @@ class MqttClient(mqtt.Client):
                 },
             )
 
+    def _on_message_cb(self, client: mqtt.Client, userdata: typing.Any, message: mqtt.MQTTMessage):
+        try:
+            subscription_context = self._subscriptions[message.topic]
+            cb_time = time.time()
+            message_size = len(message.payload)
+            self.environment.events.request.fire(
+                request_type=REQUEST_TYPE,
+                name=self._generate_mqtt_event_name("message_in", message.qos, message.topic),
+                response_time=0,
+                response_length=message_size,
+                exception=None,
+                context={
+                    "client_id": self.client_id,
+                    "topic": message.topic,
+                    "qos": message.qos,
+                    "receive_time": cb_time,
+                },
+            )
+        except KeyError:
+            pass
+
     def publish(
         self,
         topic: str,
@@ -293,6 +324,7 @@ class MqttClient(mqtt.Client):
         qos: int = 0,
         options: typing.Optional[SubscribeOptions] = None,
         properties: typing.Optional[Properties] = None,
+        message_in_events: bool = False,
     ) -> typing.Tuple[int, typing.Optional[int]]:
         """Subscribe to a given topic.
 
@@ -303,6 +335,7 @@ class MqttClient(mqtt.Client):
             qos=qos,
             topic=topic,
             start_time=time.time(),
+            message_in_events=message_in_events,
         )
 
         result, mid = super().subscribe(topic=topic, qos=qos)
